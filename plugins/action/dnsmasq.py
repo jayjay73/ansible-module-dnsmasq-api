@@ -29,7 +29,7 @@ display = Display()
 
 # these are mainly just helpful for debugging
 #import dumper
-#import pprint
+import pprint
 
 # a print function that prints to STDERR. Helpful for debugging.
 def eprint(*args, **kwargs):
@@ -80,9 +80,18 @@ class DNSAPIConn:
             return response
 
 
-    def delete(self, zone, ip, name):
+    def delete(self, zone, ip= None, name= None):
         try:
-            response= requests.delete(f"{self.api_url}/zones/{zone}/{ip}/{name}")
+            if ip is None and name is None:
+                request_str= "/".join([self.api_url, "zones", zone])
+            elif ip is not None and name is None:
+                request_str= "/".join([self.api_url, "zones", zone, ip])
+            elif ip is not None and name is not None:
+                request_str= "/".join([self.api_url, "zones", zone, ip, name])
+            else:
+                raise AnsibleError(f"delete called with wrong parameters: zone: {zone}, ip: {ip}, name: {name}")
+
+            response= requests.delete(request_str)
             response.raise_for_status()
         except requests.exceptions.HTTPError as http_err:
             raise AnsibleError(f"HTTP error occurred: {http_err}")
@@ -150,41 +159,65 @@ class ActionModule(ActionBase):
         if type(value) is not list:
             value= [value]
 
-        record= str(record)
 
         # read records from dnsmasq
         api= DNSAPIConn(api_url)
-        res= api.get(zone)
+        res= api.get()
+        dnsmasq_zones= res.json()
 
-        # handle calls with no zone specified
-        if type(res.json()) is list:
-            dnsmasq_zones= res.json()
-        else:
-            dnsmasq_zones=[zone]
-
-        for zone in dnsmasq_zones:
-            res= api.get(zone)
-            zone= str(zone)
-
-            a_records= reverse_records(res.json())
-
-            if record in a_records:
-                got[zone]= {record: a_records[record]}
-            else:
-                got[zone]= {record: {}}
-
+        if zone not in dnsmasq_zones and zone is not None:
+            # new zone
+            got= {}
             wanted_ips=[]
             for ip in value:
                 wanted_ips.append(str(ip))
-
-            # sorting got makes diff mode output nicer
-            for k,v in got[zone].items():
-                got[zone]= {k: list(sorted(set(v)))}
-
             if state == "present":
-                wanted[zone]= {record: list(sorted(set(got[zone][record]) | set(wanted_ips)))}
+                wanted[str(zone)]= {str(record): list(sorted(set(wanted_ips)))}
             if state == "absent":
-                wanted[zone]= {record: list(sorted(set(got[zone][record]) - set(wanted_ips)))}
+                wanted[str(zone)]= {}
+            dnsmasq_zones= [zone]
+        else:
+            # existing zone
+            if zone in dnsmasq_zones:
+                dnsmasq_zones=[zone]
+
+            for zone in dnsmasq_zones:
+                print (zone)
+                res= api.get(zone)
+                zone= str(zone)
+                # zone iterates now over a list of either one or all zones
+
+                a_records= reverse_records(res.json())
+
+                if state == "absent" and record is None:
+                    # whole zone is scheduled to be deleted
+
+                    # populate got with all zone entries
+                    for a, ip in a_records.items():
+                        if zone in got:
+                            got[zone].append({a: ip})
+                        else:
+                            got[zone]= [{a: ip}]
+                else:
+                    record= str(record)
+
+                    if record in a_records:
+                        got[zone]= {record: a_records[record]}
+                    else:
+                        got[zone]= {record: {}}
+
+                    wanted_ips=[]
+                    for ip in value:
+                        wanted_ips.append(str(ip))
+
+                    # sorting got makes diff mode output nicer
+                    for k,v in got[zone].items():
+                        got[zone]= {k: list(sorted(set(v)))}
+
+                    if state == "present":
+                        wanted[zone]= {record: list(sorted(set(got[zone][record]) | set(wanted_ips)))}
+                    if state == "absent":
+                        wanted[zone]= {record: list(sorted(set(got[zone][record]) - set(wanted_ips)))}
 
 
         if got != wanted:
@@ -209,21 +242,28 @@ class ActionModule(ActionBase):
         # make some changes
 
         for zone in dnsmasq_zones:
-            res= api.get(zone)
             zone= str(zone)
         
             # add record
             if state == "present":
                 to_add= {}
-                to_add[record]= list(sorted(set(wanted[zone][record]) - set(got[zone][record])))
+                if zone in got:
+                    to_add[record]= list(sorted(set(wanted[zone][record]) - set(got[zone][record])))
+                else:
+                    to_add[record]= list(sorted(set(wanted[zone][record])))
+
                 for ip in to_add[record]:
                     api.post(zone, ip, record)
 
             # remove record
             if state == "absent":
-                to_remove= {}
-                to_remove[record]= list(sorted(set(got[zone][record]) & set(wanted_ips)))
-                for ip in to_remove[record]:
-                    api.delete(zone, ip, record)
+                if record is None:
+                    # remove the whole zone
+                    api.delete(zone)
+                else:
+                    to_remove= {}
+                    to_remove[record]= list(sorted(set(got[zone][record]) & set(wanted_ips)))
+                    for ip in to_remove[record]:
+                        api.delete(zone, ip, record)
 
         return result
