@@ -143,17 +143,21 @@ class ActionModule(ActionBase):
 
         # get module arguments
         api_url= str(self._task.args.get('api_url', None))
-        zone= self._task.args.get('zone', None)
-        record= self._task.args.get('record', None)
+        zone_arg= self._task.args.get('zone', None)
+        record_arg= self._task.args.get('record', None)
         value= self._task.args.get('value', None)
-        state= self._task.args.get('state', "present")
+        state_arg= self._task.args.get('state', "present")
+
+        zone= str(zone_arg)
+        record= str(record_arg)
+        state= str(state_arg)
 
         #target_host= str(task_vars['inventory_hostname'])
 
         if state != "present" and state != "absent":
             raise AnsibleError(f"Unrecognized value in argument 'state': {state}")
 
-        if state == "present" and zone is None:
+        if state == "present" and zone_arg is None:
             raise AnsibleError(f"Can't add records without a zone file given.")
 
         if type(value) is not list:
@@ -165,16 +169,16 @@ class ActionModule(ActionBase):
         res= api.get()
         dnsmasq_zones= res.json()
 
-        if zone not in dnsmasq_zones and zone is not None:
+        if zone not in dnsmasq_zones and zone_arg is not None:
             # new zone
             got= {}
             wanted_ips=[]
             for ip in value:
                 wanted_ips.append(str(ip))
             if state == "present":
-                wanted[str(zone)]= {str(record): list(sorted(set(wanted_ips)))}
+                wanted[zone]= {record: list(sorted(set(wanted_ips)))}
             if state == "absent":
-                wanted[str(zone)]= {}
+                wanted[zone]= {}
             dnsmasq_zones= [zone]
         else:
             # existing zone
@@ -182,14 +186,13 @@ class ActionModule(ActionBase):
                 dnsmasq_zones=[zone]
 
             for zone in dnsmasq_zones:
-                print (zone)
-                res= api.get(zone)
                 zone= str(zone)
+                res= api.get(zone)
                 # zone iterates now over a list of either one or all zones
 
                 a_records= reverse_records(res.json())
 
-                if state == "absent" and record is None:
+                if state == "absent" and record_arg is None:
                     # whole zone is scheduled to be deleted
 
                     # populate got with all zone entries
@@ -199,8 +202,6 @@ class ActionModule(ActionBase):
                         else:
                             got[zone]= [{a: ip}]
                 else:
-                    record= str(record)
-
                     if record in a_records:
                         got[zone]= {record: a_records[record]}
                     else:
@@ -257,7 +258,7 @@ class ActionModule(ActionBase):
 
             # remove record
             if state == "absent":
-                if record is None:
+                if record_arg is None:
                     # remove the whole zone
                     api.delete(zone)
                 else:
